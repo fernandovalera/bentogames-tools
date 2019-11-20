@@ -24,7 +24,7 @@ public class LuaDocFilter {
 
     private static final String TABLE_ROW = "tr";
 
-    private static final String[] ACCEPTABLE_DATA_FILES = new String[] {
+    private static final String[] ACCEPTABLE_FILES = new String[] {
         "index", "Libarary.GlobalDataObject", "Library.GameObject", "Armies.Army", "Data.Battle", "Cities.City",
         "Data.GameTeam", "Structures.Structure", "Territories.Territory", "Generals.General", "ClientRequestSender"
     };
@@ -49,24 +49,25 @@ public class LuaDocFilter {
 
         try {
             List<File> fileList = listFilesAndDirectoriesForFolder(dirFrom);
-            for (File file : fileList) {
+            for (File srcFile : fileList) {
                 // Only copy over html files
 
-                if (file.isDirectory()) {
+                if (srcFile.isDirectory()) {
                     // Create directories
-                    new File(getNewPathFromOldPath(dirFrom, dirTo, file).toString()).mkdirs();
-                    continue;
-                } else if (!file.getName().endsWith("html")) {
+                    new File(getNewPathFromOldPath(dirFrom, dirTo, srcFile).toString()).mkdirs();
+                } else if (!srcFile.getName().endsWith("html")) {
                     // Copy non-html files
-                    Files.copy(file.toPath(), getNewPathFromOldPath(dirFrom, dirTo, file));
-                    continue;
-                } else if (Arrays.stream(ACCEPTABLE_DATA_FILES).noneMatch(file.getName()::contains)) {
-                    // Skip files that do not pass the filter
-                    continue;
-                } else if (file.getAbsolutePath().contains("SharedSource.Data")) {
-                    addDataFile(file, new File(getNewPathFromOldPath(dirFrom, dirTo, file).toString()));
-                } else if (file.getAbsolutePath().contains("LocalSource.Publishers")) {
-                    addClientRequestSender(file, new File(getNewPathFromOldPath(dirFrom, dirTo, file).toString()));
+                    Files.copy(srcFile.toPath(), getNewPathFromOldPath(dirFrom, dirTo, srcFile));
+                } else if (Arrays.stream(ACCEPTABLE_FILES).anyMatch(srcFile.getName()::contains)) {
+                    // Filter accepted files
+                    File toFile = new File(getNewPathFromOldPath(dirFrom, dirTo, srcFile).toString());
+                    if (srcFile.getAbsolutePath().contains("SharedSource.Data")) {
+                        addDataFile(srcFile, toFile);
+                    } else if (srcFile.getAbsolutePath().contains("LocalSource.Publishers")) {
+                        addClientRequestSender(srcFile, toFile);
+                    } else {
+                        addGenericFile(srcFile, toFile);
+                    }
                 }
             }
         } catch(FileNotFoundException e){
@@ -76,52 +77,24 @@ public class LuaDocFilter {
         }
     }
 
+    private static void addGenericFile(File fileFrom, File fileTo) throws IOException {
+        String content = new Scanner(fileFrom).useDelimiter("\\Z").next();
+        Document document = Jsoup.parse(content);
+
+        filterModuleList(document);
+
+        // Write the file to new dir
+        try (FileWriter writer = new FileWriter(fileTo)) {
+            writer.write(document.toString());
+        }
+    }
+
     private static void addDataFile(File fileFrom, File fileTo) throws IOException {
         String content = new Scanner(fileFrom).useDelimiter("\\Z").next();
         Document document = Jsoup.parse(content);
 
-        Elements headers = document.getElementsByTag("h2");
-        for (Element header : headers) {
-            if (!header.text().equals("Modules")) {
-                continue;
-            }
-            Element moduleList = header.nextElementSibling();
-            for (Element moduleListItem : moduleList.children()) {
-                Elements aTags = moduleListItem.getElementsByTag("a");
-                if (!aTags.isEmpty()) {
-                    String link = aTags.get(0).attr("href");
-                    if (Arrays.stream(ACCEPTABLE_DATA_FILES).noneMatch(link::contains)) {
-                        moduleListItem.remove();
-                    }
-                }
-            }
-        }
-
-        // There should only be one tag with class 'function_list'
-        Elements functionLists = document.getElementsByClass("function_list");
-        for (Element functionList : functionLists) {
-            for (Element row : functionList.getElementsByTag(TABLE_ROW)) {
-                // <tr><td ...><a ...></a>FUNCTION_NAME</td> ...
-                String functionName = row.child(0).child(0).text();
-                if (!functionName.startsWith("get") && !functionName.startsWith("is")) {
-                    row.remove();
-                }
-            }
-        }
-        // There should only be one tag with class 'function'
-        Elements functions = document.getElementsByClass("function");
-        for (Element function : functions) {
-            // Search through each <dt></dt> and <dd></dd> pair
-            for (Element element : function.getElementsByTag("dt")) {
-                String functionName = element.getElementsByTag("a").get(0).attr("name");
-                if (!functionName.startsWith("get") && !functionName.startsWith("is")) {
-                    // Remove <dt></dt> and <dd></dd> tags
-                    Element nextElement = element.nextElementSibling();
-                    element.remove();
-                    nextElement.remove();
-                }
-            }
-        }
+        filterModuleList(document);
+        filterFunctionList(document, new String[] { "get", "is" });
 
         // Write the file to new dir
         try (FileWriter writer = new FileWriter(fileTo)) {
@@ -133,11 +106,63 @@ public class LuaDocFilter {
         String content = new Scanner(fileFrom).useDelimiter("\\Z").next();
         Document document = Jsoup.parse(content);
 
-        // TODO: remove sensitive data
+        filterModuleList(document);
+        filterFunctionList(document, new String[] { "sendArmy" });
 
         // Write the file to new dir
         try (FileWriter writer = new FileWriter(fileTo)) {
             writer.write(document.toString());
+        }
+    }
+
+    private static void filterFunctionList(Document document, String[] methodStartsWithArray) {
+        // There should only be one tag with class 'function_list'
+        Elements functionLists = document.getElementsByClass("function_list");
+        for (Element functionList : functionLists) {
+            for (Element row : functionList.getElementsByTag(TABLE_ROW)) {
+                // <tr><td ...><a ...></a>FUNCTION_NAME</td> ...
+                String functionName = row.child(0).child(0).text();
+                if (Arrays.stream(methodStartsWithArray).noneMatch(functionName::startsWith)) {
+                    row.remove();
+                }
+            }
+        }
+
+        // There should only be one tag with class 'function'
+        Elements functions = document.getElementsByClass("function");
+        for (Element function : functions) {
+            // Search through each <dt></dt> and <dd></dd> pair
+            for (Element element : function.getElementsByTag("dt")) {
+                String functionName = element.getElementsByTag("a").get(0).attr("name");
+                if (Arrays.stream(methodStartsWithArray).noneMatch(functionName::startsWith)) {
+                    // Remove <dt></dt> and <dd></dd> tags
+                    Element nextElement = element.nextElementSibling();
+                    element.remove();
+                    nextElement.remove();
+                }
+            }
+        }
+    }
+
+    private static void filterModuleList(Document document) {
+        Elements headers = document.getElementsByTag("h2");
+        for (Element header : headers) {
+            if (!header.text().equals("Modules")) {
+                continue;
+            }
+            Element moduleList = header.nextElementSibling();
+            if (moduleList.tagName().equals("table")) {
+                moduleList = moduleList.getElementsByTag("tbody").get(0);
+            }
+            for (Element moduleListItem : moduleList.children()) {
+                Elements aTags = moduleListItem.getElementsByTag("a");
+                if (!aTags.isEmpty()) {
+                    String link = aTags.get(0).attr("href");
+                    if (Arrays.stream(ACCEPTABLE_FILES).noneMatch(link::contains)) {
+                        moduleListItem.remove();
+                    }
+                }
+            }
         }
     }
 
